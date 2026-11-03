@@ -47,6 +47,12 @@
   .bar { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
   .bar button { font:inherit; font-size:13px; padding:8px 14px; border-radius:999px; border:1px solid var(--line); background:var(--chip); color:var(--text); cursor:pointer; }
   .bar button:hover { border-color:var(--accent); }
+  .drop { position:absolute; inset:0; z-index:4; display:none; align-items:center; justify-content:center; text-align:center;
+          background:rgba(37,99,235,.82); color:#fff; font-weight:600; font-size:18px; border-radius:6%; pointer-events:none; }
+  .phone.drag .drop { display:flex; }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#14161a; color:#fff; padding:10px 16px;
+           border-radius:12px; font-size:14px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:90vw; z-index:9; }
+  .toast.show { opacity:1; }
   .tip { color:var(--muted); font-size:12.5px; margin:0; text-align:center; }
 </style>
 </head>
@@ -80,6 +86,7 @@
         <div id="hint" class="sub hide"></div>
       </div>
     </div>
+    <div class="drop">Drop to send<br>to your phone</div>
     <img class="frame" src="phone-frame.png" alt="" draggable="false">
   </div>
 
@@ -90,8 +97,10 @@
     <button data-k="24">Vol +</button>
     <button data-k="25">Vol −</button>
     <button data-k="26">Power</button>
+    <button id="add">＋ Add media</button>
+    <input type="file" id="file" multiple accept="image/*,video/*,audio/*" class="hide">
   </div>
-  <p class="tip">Click = tap · drag = swipe · scroll wheel = scroll · just type with your keyboard</p>
+  <p class="tip">Click = tap · drag = swipe · scroll wheel = scroll · type with your keyboard · drop or paste photos &amp; videos to send them to the phone</p>
 
 <script>
 const AGENT = 'http://localhost:4173';
@@ -225,6 +234,52 @@ $('pair').onclick = async () => {
   if (!r.ok) alert((await r.json()).error);
   poll();
 };
+
+// ---------- send media to the phone (drop / paste / picker) ----------
+const toast = document.createElement('div');
+toast.className = 'toast';
+document.body.appendChild(toast);
+let toastTimer;
+const say = (t, ms = 3500) => { toast.textContent = t; toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), ms); };
+
+function upload(file) {
+  return new Promise((resolve) => {
+    const name = file.name && file.name !== 'image.png' ? file.name : `pasted-${Date.now()}.${(file.type.split('/')[1] || 'png').split(';')[0]}`;
+    const x = new XMLHttpRequest();
+    x.open('POST', AGENT + '/api/upload?name=' + encodeURIComponent(name));
+    x.upload.onprogress = (e) => e.lengthComputable && say(`Sending ${name}… ${Math.round((e.loaded / e.total) * 100)}%`, 10000);
+    x.onload = () => {
+      let r = {}; try { r = JSON.parse(x.responseText); } catch {}
+      say(x.status === 200 ? `Sent ${name} → Gallery › PhoneClone` : (r.error || 'Could not send the file'));
+      resolve(x.status === 200);
+    };
+    x.onerror = () => { say('Helper not reachable. Is it running?'); resolve(false); };
+    x.send(file);
+  });
+}
+
+async function sendFiles(files) {
+  if (!phone.classList.contains('live')) return say('Connect your phone first');
+  for (const f of files) await upload(f);
+}
+
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+addEventListener('dragenter', (e) => { if (hasFiles(e)) { e.preventDefault(); dragDepth++; phone.classList.add('drag'); } });
+addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; phone.classList.remove('drag'); } });
+addEventListener('drop', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; phone.classList.remove('drag'); sendFiles([...e.dataTransfer.files]); });
+
+addEventListener('paste', (e) => {
+  if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); return sendFiles(files); }
+  const text = e.clipboardData?.getData('text');
+  if (text && phone.classList.contains('live')) { e.preventDefault(); send({ t: 'text', s: text.slice(0, 500) }); }
+});
+
+$('add').onclick = () => $('file').click();
+$('file').onchange = (e) => { sendFiles([...e.target.files]); e.target.value = ''; };
 
 poll();
 setInterval(poll, 1000);

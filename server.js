@@ -3,6 +3,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { pipeline } = require('stream/promises');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const QRCode = require('qrcode');
@@ -12,6 +14,9 @@ const PORT = 4173;
 const POLL_MS = 1500;
 const CONNECT_TIMEOUT_MS = 25000;
 const STREAM_WIDTH = 720;
+const MAX_UPLOAD = 2 * 1024 ** 3;
+const safeName = (n) =>
+  path.basename(String(n || 'file')).replace(/[^\w.-]+/g, '_').slice(-100) || 'file';
 
 // Pages allowed to control the phone besides localhost. Add your deployed URL.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -258,6 +263,28 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
+  if (req.url.startsWith('/api/upload') && req.method === 'POST') {
+    const serial = state.serial;
+    if (!serial || state.status !== 'connected') return json(res, 409, { error: 'Phone is not connected' });
+    if (Number(req.headers['content-length'] || 0) > MAX_UPLOAD) return json(res, 413, { error: 'File too large (2 GB max)' });
+    const name = safeName(new URL(req.url, 'http://x').searchParams.get('name'));
+    const tmp = path.join(os.tmpdir(), `phoneclone-${crypto.randomBytes(4).toString('hex')}-${name}`);
+    const remote = `/sdcard/DCIM/PhoneClone/${Date.now().toString(36)}_${name}`;
+    try {
+      await pipeline(req, fs.createWriteStream(tmp));
+      await run('adb', ['-s', serial, 'shell', 'mkdir', '-p', '/sdcard/DCIM/PhoneClone']);
+      const push = await run('adb', ['-s', serial, 'push', tmp, remote], 600000);
+      if (!push.ok) return json(res, 500, { error: 'Could not copy to the phone' });
+      // make it show up in Gallery / photo pickers right away
+      await run('adb', ['-s', serial, 'shell', 'am', 'broadcast', '-a',
+        'android.intent.action.MEDIA_SCANNER_SCAN_FILE', '-d', `file://${remote}`]);
+      return json(res, 200, { ok: true, name, path: remote });
+    } catch {
+      return json(res, 500, { error: 'Upload failed' });
+    } finally {
+      fs.unlink(tmp, () => {});
+    }
+  }
   if (req.url === '/api/state') return json(res, 200, state);
   if (req.url === '/api/retry' && req.method === 'POST') {
     await newSession();
@@ -307,6 +334,14 @@ async function init() {
   await newSession();
   setInterval(tick, POLL_MS);
 }
+
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\n  Port ${PORT} is already in use. Phone Clone may already be running: http://localhost:${PORT}\n`);
+    process.exit(0);
+  }
+  throw e;
+});
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  Phone Clone agent running → http://localhost:${PORT}\n`);
