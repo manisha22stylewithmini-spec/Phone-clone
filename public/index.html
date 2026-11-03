@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Clone</title>
+<style>
+  :root { --bg:#eef0f4; --text:#14161a; --muted:#6b7280; --chip:#fff; --line:#d9dce3; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d0f13; --text:#f2f4f7; --muted:#8b94a3; --chip:#1a1d23; --line:#2a2e36; --accent:#5b8cff; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+         font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:16px; }
+
+  /* the phone: frame image on top, live screen underneath it */
+  .phone { position:relative; height:min(84vh, 860px); aspect-ratio:986/2000; filter:drop-shadow(0 24px 40px rgba(0,0,0,.35)); }
+  .screen { position:absolute; left:6.085%; top:3%; width:87.83%; height:94%; background:#000; overflow:hidden; }
+  .frame { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:3; }
+  canvas { width:100%; height:100%; display:none; touch-action:none; cursor:pointer; background:#000; }
+  .live canvas { display:block; }
+
+  /* setup panel shown on the phone screen until the stream starts */
+  .ui { position:absolute; inset:0; background:#fff; color:#14161a; z-index:2; padding:13% 8% 8%;
+        display:flex; flex-direction:column; align-items:center; text-align:center; overflow:auto; }
+  .live .ui { display:none; }
+  .ui h1 { font-size:20px; margin:0 0 2px; }
+  .ui .sub { color:#6b7280; font-size:13px; margin:0 0 14px; }
+  .qr { width:min(220px, 72%); aspect-ratio:1; background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:6px; }
+  .qr svg { width:100%; height:100%; display:block; }
+  ol { text-align:left; color:#6b7280; font-size:12.5px; padding-left:18px; margin:14px 0 8px; }
+  ol b { color:#14161a; }
+  .status { font-weight:600; font-size:14px; margin:6px 0; display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:#2563eb; animation:pulse 1.2s infinite; }
+  .bad .dot { background:#dc2626; animation:none; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  .ui button, .ui input { font:inherit; font-size:13px; width:100%; border-radius:10px; padding:9px 12px; }
+  .ui button { border:0; background:#2563eb; color:#fff; font-weight:600; cursor:pointer; margin-top:6px; }
+  .ui button.ghost { background:none; color:#6b7280; font-weight:500; }
+  .ui input { border:1px solid #e5e7eb; margin-top:6px; background:#f6f7f9; color:#14161a; }
+  details { width:100%; text-align:left; color:#6b7280; font-size:12.5px; margin-top:4px; }
+  summary { cursor:pointer; text-align:center; }
+  code { background:#f1f3f6; padding:3px 7px; border-radius:6px; font-size:12px; user-select:all; display:inline-block; margin-top:6px; }
+  .hide { display:none !important; }
+
+  .bar { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  .bar button { font:inherit; font-size:13px; padding:8px 14px; border-radius:999px; border:1px solid var(--line); background:var(--chip); color:var(--text); cursor:pointer; }
+  .bar button:hover { border-color:var(--accent); }
+  .tip { color:var(--muted); font-size:12.5px; margin:0; text-align:center; }
+</style>
+</head>
+<body>
+  <div class="phone" id="phone">
+    <div class="screen">
+      <canvas id="cv"></canvas>
+
+      <div class="ui" id="ui">
+        <h1>Phone Clone</h1>
+        <p class="sub" id="sub">Control your Android phone from this laptop</p>
+
+        <div id="scan" class="hide" style="width:100%;display:flex;flex-direction:column;align-items:center">
+          <div class="qr" id="qr"></div>
+          <ol>
+            <li>Same <b>Wi-Fi</b> on phone and laptop</li>
+            <li><b>Settings → Developer options → Wireless debugging</b></li>
+            <li>Tap <b>Pair device with QR code</b> and scan</li>
+          </ol>
+          <details>
+            <summary>Scan not working?</summary>
+            <p>Plug in a USB cable and allow USB debugging, or pair by code: tap <b>Pair device with pairing code</b> on the phone and type it here.</p>
+            <input id="addr" placeholder="IP:port  e.g. 192.168.1.5:37123" inputmode="decimal">
+            <input id="code" placeholder="6-digit code" inputmode="numeric" maxlength="6">
+            <button id="pair">Pair</button>
+          </details>
+          <button class="ghost" id="retry">New QR code</button>
+        </div>
+
+        <div class="status" id="status"><span class="dot"></span><span id="msg">Looking for your laptop helper…</span></div>
+        <div id="hint" class="sub hide"></div>
+      </div>
+    </div>
+    <img class="frame" src="phone-frame.png" alt="" draggable="false">
+  </div>
+
+  <div class="bar" id="bar">
+    <button data-k="4">◀ Back</button>
+    <button data-k="3">● Home</button>
+    <button data-k="187">▣ Recents</button>
+    <button data-k="24">Vol +</button>
+    <button data-k="25">Vol −</button>
+    <button data-k="26">Power</button>
+  </div>
+  <p class="tip">Click = tap · drag = swipe · scroll wheel = scroll · just type with your keyboard</p>
+
+<script>
+const AGENT = 'http://localhost:4173';
+const WSURL = 'ws://localhost:4173/stream';
+const $ = (id) => document.getElementById(id);
+const phone = $('phone'), cv = $('cv'), ctx = cv.getContext('2d');
+
+let ws = null, decoder = null, ts = 0, lastQr = '';
+
+// ---------- status panel ----------
+const MSG = {
+  waiting: 'Waiting for scan…', pairing: 'Phone found. Pairing…', connecting: 'Connecting…',
+  connected: 'Opening phone screen…', error: 'Something went wrong', missing: 'One-time setup needed',
+};
+
+function panel(kind, msg, hint = '') {
+  $('scan').classList.toggle('hide', kind !== 'scan');
+  $('scan').style.display = kind === 'scan' ? 'flex' : 'none';
+  $('status').classList.toggle('bad', kind === 'error' || kind === 'down');
+  $('msg').textContent = msg;
+  $('hint').classList.toggle('hide', !hint);
+  $('hint').innerHTML = hint;
+}
+
+async function poll() {
+  let s;
+  try { s = await (await fetch(AGENT + '/api/state')).json(); }
+  catch {
+    stopStream();
+    return panel('down', 'Start the helper on your laptop',
+      'In the project folder run:<br><code>npm start</code><br>Use Chrome or Edge.');
+  }
+  if (s.status === 'connected') {
+    if (!ws) startStream();
+    if (!phone.classList.contains('live')) panel('wait', MSG.connected);
+    return;
+  }
+  stopStream();
+  if (s.status === 'missing') return panel('error', MSG.missing, 'Run once:<br><code>' + s.message + '</code>');
+  const scanning = s.status === 'waiting' || s.status === 'error';
+  if (scanning && s.qr && s.qr !== lastQr) { $('qr').innerHTML = s.qr; lastQr = s.qr; }
+  panel(scanning ? 'scan' : 'wait', MSG[s.status] || s.status, s.status === 'error' ? s.message : '');
+  if (s.status === 'error') $('status').classList.add('bad');
+}
+
+// ---------- screen stream (H.264 → canvas) ----------
+const hex = (n) => n.toString(16).padStart(2, '0');
+function codecOf(a) {
+  for (let i = 0; i + 6 < a.length; i++)
+    if (a[i] === 0 && a[i + 1] === 0 && a[i + 2] === 1 && (a[i + 3] & 31) === 7)
+      return 'avc1.' + hex(a[i + 4]) + hex(a[i + 5]) + hex(a[i + 6]);
+  return null;
+}
+
+function resetDecoder() {
+  try { decoder && decoder.state !== 'closed' && decoder.close(); } catch {}
+  decoder = null;
+}
+
+function startStream() {
+  ws = new WebSocket(WSURL);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      if (m.t === 'init') { cv.width = m.w; cv.height = m.h; }
+      return;
+    }
+    const a = new Uint8Array(e.data), key = a[0] === 1, data = a.subarray(1);
+    if (!decoder || decoder.state === 'closed') {
+      if (!key) return;
+      const codec = codecOf(data);
+      if (!codec) return;
+      decoder = new VideoDecoder({
+        output: (f) => { ctx.drawImage(f, 0, 0, cv.width, cv.height); f.close(); phone.classList.add('live'); },
+        error: resetDecoder,
+      });
+      decoder.configure({ codec, optimizeForLatency: true });
+    }
+    decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: (ts += 16000), data }));
+  };
+  ws.onclose = () => { ws = null; stopStream(); };
+}
+
+function stopStream() {
+  if (ws) { const w = ws; ws = null; w.onclose = null; w.close(); }
+  resetDecoder();
+  phone.classList.remove('live');
+}
+
+// ---------- input ----------
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+const pos = (e) => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
+
+let down = null;
+cv.onpointerdown = (e) => { cv.setPointerCapture(e.pointerId); down = { ...pos(e), t: performance.now() }; };
+cv.onpointerup = (e) => {
+  if (!down) return;
+  const up = pos(e), dt = performance.now() - down.t;
+  const dist = Math.hypot(up.x - down.x, (up.y - down.y) * 2);
+  if (dist < 0.02 && dt < 450) send({ t: 'tap', x: up.x, y: up.y });
+  else send({ t: 'swipe', x1: down.x, y1: down.y, x2: up.x, y2: up.y, ms: Math.min(dt, 1500) });
+  down = null;
+};
+
+let wheelAcc = 0, wheelTimer = null;
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  wheelAcc += e.deltaY;
+  clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(() => {
+    const d = Math.max(-0.5, Math.min(0.5, wheelAcc / 700));
+    send({ t: 'swipe', x1: 0.5, y1: 0.6, x2: 0.5, y2: 0.6 - d, ms: 160 });
+    wheelAcc = 0;
+  }, 60);
+}, { passive: false });
+
+const KEYS = { Backspace: 67, Enter: 66, Tab: 61, Escape: 4, ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22, Delete: 112 };
+addEventListener('keydown', (e) => {
+  if (!phone.classList.contains('live') || /INPUT|TEXTAREA/.test(e.target.tagName) || e.ctrlKey || e.metaKey) return;
+  if (KEYS[e.key]) { e.preventDefault(); send({ t: 'key', code: KEYS[e.key] }); }
+  else if (e.key.length === 1) { e.preventDefault(); send({ t: 'text', s: e.key }); }
+});
+
+$('bar').onclick = (e) => { const k = e.target.dataset.k; if (k) send({ t: 'key', code: +k }); };
+
+// ---------- setup actions ----------
+$('retry').onclick = async () => { await fetch(AGENT + '/api/retry', { method: 'POST' }); poll(); };
+$('pair').onclick = async () => {
+  const r = await fetch(AGENT + '/api/pair', { method: 'POST', body: JSON.stringify({ addr: $('addr').value.trim(), code: $('code').value.trim() }) });
+  if (!r.ok) alert((await r.json()).error);
+  poll();
+};
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
