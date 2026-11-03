@@ -16,7 +16,7 @@ const STREAM_WIDTH = 720;
 // Pages allowed to control the phone besides localhost. Add your deployed URL.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
-  .concat(['https://phone-clone-seven.vercel.app'])
+  .concat(['https://phone-clone-sigma.vercel.app'])
   .filter(Boolean);
 
 const originOk = (origin) => {
