@@ -304,10 +304,14 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, state);
   }
   // local copy of the page (same files that are deployed)
-  const file = req.url === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
-  const full = path.join(__dirname, 'public', file);
-  if (req.method === 'GET' && fs.existsSync(full)) {
-    const types = { '.html': 'text/html; charset=utf-8', '.png': 'image/png' };
+  const root = path.join(__dirname, 'public');
+  const rel = decodeURIComponent(req.url.split('?')[0]);
+  const full = path.normalize(path.join(root, rel === '/' ? 'index.html' : rel));
+  if (req.method === 'GET' && full.startsWith(root + path.sep) && fs.existsSync(full) && fs.statSync(full).isFile()) {
+    const types = {
+      '.html': 'text/html; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.webp': 'image/webp', '.svg': 'image/svg+xml', '.gif': 'image/gif',
+    };
     res.writeHead(200, { 'Content-Type': types[path.extname(full)] || 'application/octet-stream' });
     return res.end(fs.readFileSync(full));
   }
