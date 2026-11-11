@@ -8,7 +8,7 @@ laptop talks to the phone, because a website alone cannot reach it.
 ## Run
 
 ```bash
-brew install android-platform-tools
+brew install android-platform-tools scrcpy
 npm install
 npm start
 ```
@@ -18,3 +18,5 @@ Open http://localhost:4173 (or your deployed page in Chrome/Edge), then on the p
 A USB cable with USB debugging on also works and is smoother.
 
 To allow your deployed page to control the phone, set `ALLOWED_ORIGINS=https://your-site.vercel.app`.
+
+The screen is streamed with scrcpy's on-device server (low latency) and touch is sent live, so dragging follows your finger.

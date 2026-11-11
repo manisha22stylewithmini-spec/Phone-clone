@@ -9,11 +9,11 @@ const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const QRCode = require('qrcode');
 const { WebSocketServer } = require('ws');
+const { startStream } = require('./stream');
 
 const PORT = 4173;
 const POLL_MS = 1500;
 const CONNECT_TIMEOUT_MS = 25000;
-const STREAM_WIDTH = 720;
 const MAX_UPLOAD = 2 * 1024 ** 3;
 const safeName = (n) =>
   path.basename(String(n || 'file')).replace(/[^\w.-]+/g, '_').slice(-100) || 'file';
@@ -129,115 +129,6 @@ async function tick() {
   }
 }
 
-// ---- screen stream + input -------------------------------------------------
-
-async function screenSize(serial) {
-  const { out } = await run('adb', ['-s', serial, 'shell', 'wm', 'size']);
-  const m = [...out.matchAll(/(\d+)x(\d+)/g)].pop();
-  return m ? { w: +m[1], h: +m[2] } : { w: 1080, h: 2400 };
-}
-
-// Split screenrecord's Annex-B byte stream into decodable chunks:
-// [1 = keyframe (SPS+PPS+IDR) | 0 = delta][bytes]
-function makeNalSplitter(emit) {
-  let buf = Buffer.alloc(0);
-  let config = [];
-  let flushTimer = null;
-
-  const handleNal = (nal) => {
-    const type = nal[4 + (nal[2] === 1 ? -1 : 0)] & 0x1f; // header byte after start code
-    const data = nal;
-    if (type === 7 || type === 8) config.push(data);
-    else if (type === 5) {
-      emit(1, Buffer.concat([...config, data]));
-      config = [];
-    } else if (type === 1) emit(0, data);
-  };
-
-  const findStart = (from) => {
-    for (let i = from; i + 3 < buf.length; i++) {
-      if (buf[i] === 0 && buf[i + 1] === 0 && (buf[i + 2] === 1 || (buf[i + 2] === 0 && buf[i + 3] === 1))) return i;
-    }
-    return -1;
-  };
-
-  const drain = (final) => {
-    let start = findStart(0);
-    if (start < 0) return;
-    for (;;) {
-      const next = findStart(start + 3);
-      if (next < 0) {
-        if (final) {
-          handleNal(buf.subarray(start));
-          buf = Buffer.alloc(0);
-        } else buf = buf.subarray(start);
-        return;
-      }
-      handleNal(buf.subarray(start, next));
-      start = next;
-    }
-  };
-
-  return (chunk) => {
-    buf = Buffer.concat([buf, chunk]);
-    drain(false);
-    // screenrecord only writes when the screen changes: don't hold the last frame
-    clearTimeout(flushTimer);
-    flushTimer = setTimeout(() => drain(true), 30);
-  };
-}
-
-function startStream(ws, serial, size) {
-  const outW = STREAM_WIDTH;
-  const outH = Math.round((size.h * outW) / size.w / 2) * 2;
-  ws.send(JSON.stringify({ t: 'init', w: outW, h: outH }));
-
-  let rec = null;
-  let alive = true;
-  const launch = () => {
-    if (!alive) return;
-    rec = spawn('adb', [
-      '-s', serial, 'exec-out', 'screenrecord',
-      '--output-format=h264', '--size', `${outW}x${outH}`,
-      '--bit-rate', '6000000', '--time-limit', '170', '-',
-    ]);
-    const feed = makeNalSplitter((key, data) => {
-      if (ws.readyState === ws.OPEN && ws.bufferedAmount < 2e6) {
-        ws.send(Buffer.concat([Buffer.from([key]), data]), { binary: true });
-      }
-    });
-    rec.stdout.on('data', feed);
-    rec.on('exit', () => setTimeout(launch, 100)); // screenrecord caps at 3 min: restart
-  };
-  launch();
-
-  // one long-lived shell so taps/swipes don't pay adb start-up each time
-  const sh = spawn('adb', ['-s', serial, 'shell']);
-  sh.stdin.on('error', () => {});
-  const cmd = (line) => sh.stdin.writable && sh.stdin.write(line + '\n');
-  const px = (v, max) => Math.max(0, Math.min(max - 1, Math.round(Number(v) * max)));
-  const esc = (s) =>
-    String(s).replace(/[\r\n]/g, '').replace(/[^A-Za-z0-9 ]/g, (c) => '\\' + c).replace(/ /g, '%s');
-
-  ws.on('message', (raw) => {
-    let m;
-    try { m = JSON.parse(raw); } catch { return; }
-    const { w, h } = size;
-    if (m.t === 'tap') cmd(`input tap ${px(m.x, w)} ${px(m.y, h)}`);
-    else if (m.t === 'swipe') {
-      const ms = Math.max(30, Math.min(3000, Math.round(Number(m.ms) || 200)));
-      cmd(`input swipe ${px(m.x1, w)} ${px(m.y1, h)} ${px(m.x2, w)} ${px(m.y2, h)} ${ms}`);
-    } else if (m.t === 'key' && Number.isInteger(m.code)) cmd(`input keyevent ${m.code}`);
-    else if (m.t === 'text' && typeof m.s === 'string') cmd(`input text ${esc(m.s)}`);
-  });
-
-  ws.on('close', () => {
-    alive = false;
-    rec && rec.kill();
-    sh.kill();
-  });
-}
-
 // ---- http ------------------------------------------------------------------
 
 const json = (res, code, body) => {
@@ -326,13 +217,20 @@ server.on('upgrade', async (req, socket, head) => {
     return;
   }
   const serial = state.serial;
-  const size = await screenSize(serial);
-  wss.handleUpgrade(req, socket, head, (ws) => startStream(ws, serial, size));
+  wss.handleUpgrade(req, socket, head, async (ws) => {
+    try {
+      await startStream(ws, serial);
+    } catch (e) {
+      console.error('stream failed:', e.message);
+      ws.send(JSON.stringify({ t: 'error', message: e.message }));
+      ws.close();
+    }
+  });
 });
 
 async function init() {
-  if (!(await run('which', ['adb'])).ok) {
-    return set('missing', 'brew install android-platform-tools');
+  if (!(await run('which', ['adb'])).ok || !(await run('which', ['scrcpy'])).ok) {
+    return set('missing', 'brew install android-platform-tools scrcpy');
   }
   await run('adb', ['start-server'], 15000);
   await newSession();

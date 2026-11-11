@@ -110,7 +110,7 @@ const WSURL = 'ws://localhost:4173/stream';
 const $ = (id) => document.getElementById(id);
 const phone = $('phone'), cv = $('cv'), ctx = cv.getContext('2d');
 
-let ws = null, decoder = null, ts = 0, lastQr = '';
+let ws = null, decoder = null, ts = 0, lastQr = '', retryAt = 0;
 
 // ---------- status panel ----------
 const MSG = {
@@ -136,7 +136,7 @@ async function poll() {
       'In the project folder run:<br><code>npm start</code><br>Use Chrome or Edge.');
   }
   if (s.status === 'connected') {
-    if (!ws) startStream();
+    if (!ws && Date.now() >= retryAt) startStream();
     if (!phone.classList.contains('live')) panel('wait', MSG.connected);
     return;
   }
@@ -157,6 +157,23 @@ function codecOf(a) {
   return null;
 }
 
+let pending = null;
+function showFrame(f) {
+  if (pending) pending.close(); // a newer frame arrived before we painted: skip the old one
+  pending = f;
+  if (pending === f && !showFrame.queued) {
+    showFrame.queued = true;
+    requestAnimationFrame(() => {
+      showFrame.queued = false;
+      if (!pending) return;
+      ctx.drawImage(pending, 0, 0, cv.width, cv.height);
+      pending.close();
+      pending = null;
+      phone.classList.add('live');
+    });
+  }
+}
+
 function resetDecoder() {
   try { decoder && decoder.state !== 'closed' && decoder.close(); } catch {}
   decoder = null;
@@ -169,6 +186,7 @@ function startStream() {
     if (typeof e.data === 'string') {
       const m = JSON.parse(e.data);
       if (m.t === 'init') { cv.width = m.w; cv.height = m.h; }
+      if (m.t === 'error') { retryAt = Date.now() + 4000; panel('error', 'Could not start the screen', m.message); }
       return;
     }
     const a = new Uint8Array(e.data), key = a[0] === 1, data = a.subarray(1);
@@ -177,7 +195,7 @@ function startStream() {
       const codec = codecOf(data);
       if (!codec) return;
       decoder = new VideoDecoder({
-        output: (f) => { ctx.drawImage(f, 0, 0, cv.width, cv.height); f.close(); phone.classList.add('live'); },
+        output: showFrame,
         error: resetDecoder,
       });
       decoder.configure({ codec, optimizeForLatency: true });
@@ -197,27 +215,31 @@ function stopStream() {
 const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 const pos = (e) => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height }; };
 
-let down = null;
-cv.onpointerdown = (e) => { cv.setPointerCapture(e.pointerId); down = { ...pos(e), t: performance.now() }; };
-cv.onpointerup = (e) => {
-  if (!down) return;
-  const up = pos(e), dt = performance.now() - down.t;
-  const dist = Math.hypot(up.x - down.x, (up.y - down.y) * 2);
-  if (dist < 0.02 && dt < 450) send({ t: 'tap', x: up.x, y: up.y });
-  else send({ t: 'swipe', x1: down.x, y1: down.y, x2: up.x, y2: up.y, ms: Math.min(dt, 1500) });
-  down = null;
+let dragging = false, lastMove = 0;
+const touch = (a, p) => send({ t: 'touch', a, x: p.x, y: p.y });
+cv.onpointerdown = (e) => { cv.setPointerCapture(e.pointerId); dragging = true; touch(0, pos(e)); };
+cv.onpointermove = (e) => {
+  if (!dragging) return;
+  const now = performance.now();
+  if (now - lastMove < 8) return; // ~120 updates/s is plenty
+  lastMove = now;
+  touch(2, pos(e));
 };
+const lift = (e) => { if (dragging) { dragging = false; touch(1, pos(e)); } };
+cv.onpointerup = lift;
+cv.onpointercancel = lift;
 
-let wheelAcc = 0, wheelTimer = null;
+// mouse wheel = a short finger drag, so every app scrolls natively
+let wheelBusy = false;
 cv.addEventListener('wheel', (e) => {
   e.preventDefault();
-  wheelAcc += e.deltaY;
-  clearTimeout(wheelTimer);
-  wheelTimer = setTimeout(() => {
-    const d = Math.max(-0.5, Math.min(0.5, wheelAcc / 700));
-    send({ t: 'swipe', x1: 0.5, y1: 0.6, x2: 0.5, y2: 0.6 - d, ms: 160 });
-    wheelAcc = 0;
-  }, 60);
+  if (wheelBusy) return;
+  wheelBusy = true;
+  const d = Math.max(-0.35, Math.min(0.35, e.deltaY / 600)), steps = 8;
+  const at = (k) => ({ x: 0.5, y: 0.6 - d * (k / steps) });
+  touch(0, at(0));
+  for (let k = 1; k <= steps; k++) setTimeout(() => touch(2, at(k)), k * 12);
+  setTimeout(() => { touch(1, at(steps)); wheelBusy = false; }, (steps + 1) * 12);
 }, { passive: false });
 
 const KEYS = { Backspace: 67, Enter: 66, Tab: 61, Escape: 4, ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22, Delete: 112 };
