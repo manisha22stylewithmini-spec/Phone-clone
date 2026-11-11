@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Phone Clone</title>
+<link rel="preload" as="image" href="phone-frame.webp" type="image/webp">
 <style>
   :root { --bg:#eef0f4; --text:#14161a; --muted:#6b7280; --chip:#fff; --line:#d9dce3; --accent:#2563eb; }
   @media (prefers-color-scheme: dark) {
@@ -87,7 +88,7 @@
       </div>
     </div>
     <div class="drop">Drop to send<br>to your phone</div>
-    <img class="frame" src="phone-frame.png" alt="" draggable="false">
+    <img class="frame" src="phone-frame.webp" width="986" height="2000" alt="" draggable="false" decoding="async">
   </div>
 
   <div class="bar" id="bar">
@@ -283,7 +284,11 @@ $('add').onclick = () => $('file').click();
 $('file').onchange = (e) => { sendFiles([...e.target.files]); e.target.value = ''; };
 
 poll();
-setInterval(poll, 1000);
+let timer = setInterval(poll, 1000);
+document.addEventListener('visibilitychange', () => {
+  clearInterval(timer);
+  if (!document.hidden) { poll(); timer = setInterval(poll, 1000); }
+});
 </script>
 </body>
 </html>
